@@ -1,0 +1,963 @@
+---
+title: "Returns to Education - LSMS-ISA - Living Standards Measurement Study"
+country: "Nigeria"
+output: Nigeria_LSMS
+data: https://www.worldbank.org/en/programs/lsms/initiatives/lsms-ISA 
+---
+1) Import Data
+```{r}
+# Define Directory:
+groupDir <- "C:/Users/hgruesohurtado/Dropbox/Documents/Laboral/Oxford/Economic Evaluation/Gates Project Nigeria/Data/"
+
+# Import Clean Data:
+library(haven)
+
+# Construct the full file path
+full_path1 <- file.path(groupDir, "LSMS-ISA/Stata/W1_W2(overall data)/w1_w2_wide(overall).dta")
+full_path2 <- file.path(groupDir, "NLSS_2018_19/NLSS_2018_19.dta")
+
+# Read the Stata file
+lsms_w2 <- read_dta(full_path1)
+nlss <- read_dta(full_path2)
+```
+
+2) Regression Tables: Mincer Equation (LSMS)
+```{r}
+library(dplyr)
+library(stargazer)
+
+# --- 1. Data Preparation ---
+df <- lsms_w2
+
+# Create a reusable function for mapping education levels to years
+map_education_to_years <- function(edu_level_var) {
+  case_when(
+    edu_level_var %in% c(11:16) ~ as.numeric(edu_level_var) - 10,  # Primary (P1-P6 -> 1-6 yrs)
+    edu_level_var %in% c(21:26) ~ as.numeric(edu_level_var) - 14,  # Junior & Senior Secondary (JS1-SS3 -> 7-12 yrs)
+    edu_level_var %in% c(27,28,31,32,33,34,41) ~ 14, # Post-secondary certificates/diplomas -> 14 yrs
+    edu_level_var == 42 ~ 16, # First Degree -> 16 yrs
+    edu_level_var == 43 ~ 18, # Higher Degree -> 18 yrs
+    TRUE ~ 0 # Includes None, Nursery, Quaranic, etc. as 0 formal years
+  )
+}
+
+# Create a reusable function for mapping education levels to categorical groups
+map_education_to_category <- function(edu_level_var) {
+  case_when(
+    edu_level_var %in% c(11:16) ~ 1, # Primary (P1-P6)
+    edu_level_var %in% c(21:23) ~ 2, # Junior Secondary (JS1-JS3)
+    edu_level_var %in% c(24:26) ~ 3, # Senior Secondary (SS1-SS3)
+    edu_level_var %in% c(27,28,31,32,33,34,41,42,43) ~ 4, # Any Higher Education (Post-secondary certs/diplomas, First Degree, Higher Degree)
+    TRUE ~ 0 # None
+  )
+}
+
+
+# Data Cleaning and Variable Creation
+df <- df %>%
+  mutate(
+    # Dependent Variable: Annual Wage and its Log
+    annual_wage_w2 = case_when(
+      wage_period == 1 ~ wage_amount * 8 * 260, # HOURLY
+      wage_period == 2 ~ wage_amount * 260,     # DAILY
+      wage_period == 3 ~ wage_amount * 52,      # WEEKLY
+      wage_period == 4 ~ wage_amount * 26,      # BI-WEEKLY
+      wage_period == 5 ~ wage_amount * 12,      # MONTHLY
+      wage_period == 6 ~ wage_amount * 4,        # QUARTERLY
+      wage_period == 7 ~ wage_amount * 2,        # BI-ANNUALLY
+      wage_period == 8 ~ wage_amount * 1,        # ANNUALLY
+      TRUE ~ NA_real_
+    ),
+    ln_wage_w2 = log(annual_wage_w2 + 1),
+
+    # Map education codes to years for respondent and parents
+    years_schooling_w2 = map_education_to_years(hgstlvli_w2),
+    father_years_schooling = map_education_to_years(father_highest_educationlevel),
+    mother_years_schooling = map_education_to_years(mother_highest_educationlevel),
+    
+    # Create new categorical education variable (will be treated as numeric in models 4 & 5)
+    categorical_education_w2 = factor(map_education_to_category(hgstlvli_w2),
+                                      levels = c(0, 1, 2, 3, 4),
+                                      labels = c("None", "Primary", "Secondary Junior", "Secondary Senior", "Higher Education")),
+    
+    # Create binary indicators for education completion
+    primary_completed_w2 = ifelse(years_schooling_w2 >= 6, 1, 0),
+    secondary_completed_w2 = ifelse(years_schooling_w2 >= 12, 1, 0),
+    higher_ed_w2 = ifelse(years_schooling_w2 > 12, 1, 0),
+
+    # Other Key Independent Variables
+    literacy_w2 = as.numeric(literacy_w2),
+    
+    # 'married_before_18' logic to include unmarried women as 0
+    age_at_marriage = marriage_year - (2013 - as.numeric(age_w2)),
+    married_before_18 = case_when(
+      age_at_marriage < 18 ~ 1,
+      age_at_marriage >= 18 ~ 0,
+      marital_statusw2 >= 4 ~ 0, # Codes unmarried women as 0
+      TRUE ~ NA_real_ 
+    ),
+    
+    # Create separate dummy variables for religion
+    is_christian = ifelse(religion == 1, 1, 0),
+    is_muslim = ifelse(religion == 2, 1, 0),
+
+    # Potential Labor Market Experience
+    age_w2_num = as.numeric(age_w2),
+    age_start_school_w2_cleaned = ifelse(as.numeric(age_start_school_w2) < 3 | as.numeric(age_start_school_w2) > 20,
+                                         NA_real_,
+                                         as.numeric(age_start_school_w2)),
+    experience_w2 = age_w2_num - years_schooling_w2 - age_start_school_w2_cleaned,
+    experience_w2 = ifelse(experience_w2 < 0, 0, experience_w2),
+    experience_sq_w2 = experience_w2^2,
+
+    # Other Control Variables
+    work_ownfarm = as.numeric(work_ownfarm),
+    work_selfemployed = as.numeric(work_selfemployed),
+    work_hired = as.numeric(work_hired)
+  ) %>%
+  filter(sex_w2 == 2) %>% # Filter for female respondents
+  # Select all needed columns, including parent's education and new categorical education
+  select(
+    annual_wage_w2, ln_wage_w2,
+    years_schooling_w2, literacy_w2, primary_completed_w2, secondary_completed_w2, higher_ed_w2,
+    categorical_education_w2, 
+    married_before_18, experience_w2, experience_sq_w2, age_w2_num,
+    father_years_schooling, mother_years_schooling,
+    work_ownfarm, work_selfemployed, work_hired,
+    religion, is_christian, is_muslim,
+    zone_w2, lga_w2
+  )
+
+# --- 2. Create Final Analysis Dataset ---
+# Filter for complete cases on all variables used in models
+df_complete <- df %>%
+  filter(complete.cases(
+    annual_wage_w2, ln_wage_w2, years_schooling_w2, literacy_w2, married_before_18,
+    experience_w2, experience_sq_w2, lga_w2,
+    father_years_schooling, mother_years_schooling,
+    work_ownfarm, work_selfemployed, work_hired, religion, is_christian, is_muslim,
+    primary_completed_w2, secondary_completed_w2, higher_ed_w2,
+    categorical_education_w2 
+  ))
+
+# Split data into whole country and northern regions
+df_all_country <- df_complete
+df_northern <- df_complete %>% filter(zone_w2 < 4)
+
+# --- 3. Descriptive Statistics Tables ---
+
+# Table 1a: For the whole country
+desc_stats_all <- df_all_country %>%
+  select(
+    `Annual Wage` = annual_wage_w2,
+    `Years of Schooling` = years_schooling_w2,
+    `Categorical Education` = categorical_education_w2, 
+    `Age` = age_w2_num,
+    `Experience` = experience_w2,
+    `Married Before 18 (1=Yes)` = married_before_18,
+    `Works on Own Farm (1=Yes)` = work_ownfarm,
+    `Is Self-Employed (1=Yes)` = work_selfemployed,
+    `Has Hired Work (1=Yes)` = work_hired,
+    `Christian (1=Yes)` = is_christian,
+    `Muslim (1=Yes)` = is_muslim,
+    `Father's Years of Schooling` = father_years_schooling,
+    `Mother's Years of Schooling` = mother_years_schooling
+  )
+
+stargazer(as.data.frame(desc_stats_all), type = "text",
+          title = "Table 1a: Descriptive Statistics (Whole Country)",
+          summary.stat = c("n", "mean", "sd", "min", "max"),
+          digits = 2, out = "table_descriptive_stats_all.txt")
+
+# Table 1b: For Northern Nigeria
+desc_stats_north <- df_northern %>%
+  select(
+    `Annual Wage` = annual_wage_w2,
+    `Years of Schooling` = years_schooling_w2,
+    `Categorical Education` = categorical_education_w2, 
+    `Age` = age_w2_num,
+    `Experience` = experience_w2,
+    `Married Before 18 (1=Yes)` = married_before_18,
+    `Works on Own Farm (1=Yes)` = work_ownfarm,
+    `Is Self-Employed (1=Yes)` = work_selfemployed,
+    `Has Hired Work (1=Yes)` = work_hired,
+    `Christian (1=Yes)` = is_christian,
+    `Muslim (1=Yes)` = is_muslim,
+    `Father's Years of Schooling` = father_years_schooling,
+    `Mother's Years of Schooling` = mother_years_schooling
+  )
+
+stargazer(as.data.frame(desc_stats_north), type = "text",
+          title = "Table 1b: Descriptive Statistics (Northern Nigeria)",
+          summary.stat = c("n", "mean", "sd", "min", "max"),
+          digits = 2, out = "table_descriptive_stats_north.txt")
+
+# --- 4. Model Estimation and Table Generation (Reordered) ---
+
+# Define common model components
+omitted_controls <- c("Constant", "father_years_schooling", "mother_years_schooling",
+                      "work_ownfarm", "work_selfemployed", "work_hired",
+                      "religion", "lga_w2")
+table_notes <- "Coefficients estimated using OLS. Controls include: father's and mother's education (years), work type, and religion."
+controls_formula <- "father_years_schooling + mother_years_schooling + work_ownfarm + work_selfemployed + work_hired + as.factor(religion)"
+fe_formula <- "as.factor(lga_w2)"
+
+# Define the new row for stargazer tables
+custom_rows <- list(c("LGA FE", "Yes", "Yes", "Yes", "Yes", "Yes"),
+                    c("Other Controls", "No", "No", "No", "No", "Yes"))
+
+# === TABLE 2: Mincer Regressions for Female Earnings (Whole Country) 
+fit2.1 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 +", fe_formula)), data = df_all_country)
+fit2.2 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 + married_before_18 +", fe_formula)), data = df_all_country)
+fit2.3 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fit2.4 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fit2.5 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fit2.1, fit2.2, fit2.3, fit2.4, fit2.5, type = "text", title = "Table 2: Mincer Regressions for Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Years of Schooling", "Married Before 18", "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "table2.txt")
+
+# === TABLE 3: Mincer Regressions for Female Earnings (Northern Nigeria)
+fit3.1 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 +", fe_formula)), data = df_northern)
+fit3.2 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 + married_before_18 +", fe_formula)), data = df_northern)
+fit3.3 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fit3.4 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fit3.5 <- lm(as.formula(paste("ln_wage_w2 ~ years_schooling_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fit3.1, fit3.2, fit3.3, fit3.4, fit3.5, type = "text", title = "Table 3: Mincer Regressions for Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Years of Schooling", "Married Before 18", "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "table3.txt")
+
+# === TABLE 4: Education Levels (Continuous) and Female Earnings (Whole Country) 
+fit4.1 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) +", fe_formula)), data = df_all_country)
+fit4.2 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) + married_before_18 +", fe_formula)), data = df_all_country)
+fit4.3 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fit4.4 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fit4.5 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fit4.1, fit4.2, fit4.3, fit4.4, fit4.5, type = "text", title = "Table 4: Education Levels (Continuous) and Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          # Updated covariate labels for continuous treatment
+          covariate.labels = c("Education Level (0-4)", "Married Before 18", "Experience", "Experience Sq.", "Education Level (0-4) x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "table4.txt")
+
+# === TABLE 5: Education Levels (Continuous) and Female Earnings (Northern Nigeria) 
+fit5.1 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) +", fe_formula)), data = df_northern)
+fit5.2 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) + married_before_18 +", fe_formula)), data = df_northern)
+fit5.3 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fit5.4 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fit5.5 <- lm(as.formula(paste("ln_wage_w2 ~ as.numeric(categorical_education_w2) * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fit5.1, fit5.2, fit5.3, fit5.4, fit5.5, type = "text", title = "Table 5: Education Levels (Continuous) and Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          # Updated covariate labels for continuous treatment
+          covariate.labels = c("Education Level (0-4)", "Married Before 18", "Experience", "Experience Sq.", "Education Level (0-4) x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "table5.txt")
+
+
+# --- 5. Appendix Tables ---
+
+# === Appendix Table 1: Literacy - Whole Country
+fitA1.1 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 +", fe_formula)), data = df_all_country)
+fitA1.2 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 + married_before_18 +", fe_formula)), data = df_all_country)
+fitA1.3 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA1.4 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA1.5 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fitA1.1, fitA1.2, fitA1.3, fitA1.4, fitA1.5, type = "text", title = "Appendix Table 1: Literacy and Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Literate", "Married Before 18", "Experience", "Experience Sq.", "Literate x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table1.txt")
+
+# === Appendix Table 2: Literacy - Northern Nigeria ===
+fitA2.1 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 +", fe_formula)), data = df_northern)
+fitA2.2 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 + married_before_18 +", fe_formula)), data = df_northern)
+fitA2.3 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA2.4 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA2.5 <- lm(as.formula(paste("ln_wage_w2 ~ literacy_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fitA2.1, fitA2.2, fitA2.3, fitA2.4, fitA2.5, type = "text", title = "Appendix Table 2: Literacy and Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Literate", "Married Before 18", "Experience", "Experience Sq.", "Literate x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table2.txt")
+
+# === Appendix Table 3: Primary Education - Whole Country ===
+fitA3.1 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 +", fe_formula)), data = df_all_country)
+fitA3.2 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 + married_before_18 +", fe_formula)), data = df_all_country)
+fitA3.3 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA3.4 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA3.5 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fitA3.1, fitA3.2, fitA3.3, fitA3.4, fitA3.5, type = "text", title = "Appendix Table 3: Primary Education & Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Completed Primary", "Married Before 18", "Experience", "Experience Sq.", "Primary x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table3.txt")
+
+# === Appendix Table 4: Primary Education - Northern Nigeria ===
+fitA4.1 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 +", fe_formula)), data = df_northern)
+fitA4.2 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 + married_before_18 +", fe_formula)), data = df_northern)
+fitA4.3 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA4.4 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA4.5 <- lm(as.formula(paste("ln_wage_w2 ~ primary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fitA4.1, fitA4.2, fitA4.3, fitA4.4, fitA4.5, type = "text", title = "Appendix Table 4: Primary Education & Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Completed Primary", "Married Before 18", "Experience", "Experience Sq.", "Primary x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table4.txt")
+
+# === Appendix Table 5: Secondary Education - Whole Country ===
+fitA5.1 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 +", fe_formula)), data = df_all_country)
+fitA5.2 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 + married_before_18 +", fe_formula)), data = df_all_country)
+fitA5.3 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA5.4 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA5.5 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fitA5.1, fitA5.2, fitA5.3, fitA5.4, fitA5.5, type = "text", title = "Appendix Table 5: Secondary Education & Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Completed Secondary", "Married Before 18", "Experience", "Experience Sq.", "Secondary x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table5.txt")
+
+# === Appendix Table 6: Secondary Education - Northern Nigeria 
+fitA6.1 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 +", fe_formula)), data = df_northern)
+fitA6.2 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 + married_before_18 +", fe_formula)), data = df_northern)
+fitA6.3 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA6.4 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA6.5 <- lm(as.formula(paste("ln_wage_w2 ~ secondary_completed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fitA6.1, fitA6.2, fitA6.3, fitA6.4, fitA6.5, type = "text", title = "Appendix Table 6: Secondary Education & Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Completed Secondary", "Married Before 18", "Experience", "Experience Sq.", "Secondary x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table6.txt")
+
+# === Appendix Table 7: Higher Education - Whole Country ===
+fitA7.1 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 +", fe_formula)), data = df_all_country)
+fitA7.2 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 + married_before_18 +", fe_formula)), data = df_all_country)
+fitA7.3 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA7.4 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_all_country)
+fitA7.5 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_all_country)
+stargazer(fitA7.1, fitA7.2, fitA7.3, fitA7.4, fitA7.5, type = "text", title = "Appendix Table 7: Higher Education & Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Higher Education", "Married Before 18", "Experience", "Experience Sq.", "Higher Ed. x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table7.txt")
+
+# === Appendix Table 8: Higher Education - Northern Nigeria ===
+fitA8.1 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 +", fe_formula)), data = df_northern)
+fitA8.2 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 + married_before_18 +", fe_formula)), data = df_northern)
+fitA8.3 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 + married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA8.4 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", fe_formula)), data = df_northern)
+fitA8.5 <- lm(as.formula(paste("ln_wage_w2 ~ higher_ed_w2 * married_before_18 + experience_w2 + experience_sq_w2 +", controls_formula, "+", fe_formula)), data = df_northern)
+stargazer(fitA8.1, fitA8.2, fitA8.3, fitA8.4, fitA8.5, type = "text", title = "Appendix Table 8: Higher Education & Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Higher Education", "Married Before 18", "Experience", "Experience Sq.", "Higher Ed. x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows, notes = table_notes, out = "appendix_table8.txt")
+
+# --- End of Script ---
+
+```
+
+3) Check on NAs (too many)
+```{r}
+# Vector of the original variable names from the lsms_w2 dataset
+original_vars <- c("wage_period", "wage_amount", "hgstlvli_w2", "marital_statusw2",
+                   "final_agew2", "age_start_school_w2", "literacy_w2",
+                   "father_highest_educationlevel", "mother_highest_educationlevel",
+                   "work_ownfarm", "work_selfemployed", "work_hired",
+                   "religion", "lga_w2", "sex_w2")
+
+# Subset the original dataframe to only these variables for the check
+check_lsms_df <- lsms_w2[original_vars]
+
+# Get a count of missing values for each original variable
+na_counts_original <- sapply(check_lsms_df, function(x) sum(is.na(x)))
+
+# Print the counts, sorted from most NAs to least
+sort(na_counts_original, decreasing = TRUE)
+
+```
+
+4) Regression Tables: Mincer Equation (NLSS)
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(stargazer)
+library(survey) # For survey analysis
+
+# --- 1. Data Preparation ---
+df <- nlss
+
+# Create reusable functions for mapping education
+map_education_to_years <- function(edu_level_var) {
+  case_when(
+    edu_level_var %in% c(11:16) ~ as.numeric(edu_level_var) - 10,
+    edu_level_var %in% c(21:26) ~ as.numeric(edu_level_var) - 14,
+    edu_level_var %in% c(27,28,31,32,33,34,41) ~ 14,
+    edu_level_var == 42 ~ 16,
+    edu_level_var == 43 ~ 18,
+    TRUE ~ 0
+  )
+}
+
+map_education_to_category <- function(edu_level_var) {
+  case_when(
+    edu_level_var %in% c(11:16) ~ 1,
+    edu_level_var %in% c(21:23) ~ 2,
+    edu_level_var %in% c(24:26) ~ 3,
+    edu_level_var %in% c(27,28,31,32,33,34,41,42,43) ~ 4,
+    TRUE ~ 0
+  )
+}
+
+# --- Data Cleaning and Variable Creation ---
+df <- df %>%
+  mutate(
+    # Dependent Variable: Annual Wage
+    annual_wage = case_when(
+      wage_frequency == 1 ~ wages * 8 * 260, # HOURLY
+      wage_frequency == 2 ~ wages * 260,     # DAILY
+      wage_frequency == 3 ~ wages * 52,      # WEEKLY
+      wage_frequency == 4 ~ wages * 26,      # BI-WEEKLY
+      wage_frequency == 5 ~ wages * 12,      # MONTHLY
+      wage_frequency == 6 ~ wages * 4,       # QUARTERLY
+      wage_frequency == 7 ~ wages * 2,       # BI-ANNUALLY
+      wage_frequency == 8 ~ wages * 1,       # ANNUALLY
+      TRUE ~ NA_real_
+    ),
+    ln_wage = log(annual_wage + 1),
+
+    # Education Variables & Quadratic Term
+    years_schooling = years_of_schooling,
+    years_schooling_sq = years_schooling^2,
+    father_years_schooling = map_education_to_years(father_highest_educational_level),
+    mother_years_schooling = map_education_to_years(mother_highest_educational_level),
+    categorical_education = factor(map_education_to_category(hgstlvl_i),
+                                   levels = c(0, 1, 2, 3, 4),
+                                   labels = c("None", "Primary", "Secondary Junior", "Secondary Senior", "Higher Education")),
+    edu_primary = ifelse(categorical_education == "Primary", 1, 0),
+    edu_secondary_junior = ifelse(categorical_education == "Secondary Junior", 1, 0),
+    edu_secondary_senior = ifelse(categorical_education == "Secondary Senior", 1, 0),
+    edu_higher = ifelse(categorical_education == "Higher Education", 1, 0),
+
+    # Independent Variables
+    literacy = ifelse(literate == 1, 1, 0),
+    married_before_18 = ifelse(age_of_marriage < 18 & !is.na(age_of_marriage), 1, 0),
+    is_christian = ifelse(religion == 1, 1, 0),
+    is_muslim = ifelse(religion == 2, 1, 0),
+
+    # Experience Calculation
+    age_num = as.numeric(age),
+    experience = case_when(
+      years_schooling > 0  ~ age_num - years_schooling - 6,
+      years_schooling == 0 ~ age_num - 10, # Assumes work starts at 10 if not schooled
+      TRUE ~ 0
+    ),
+    experience = ifelse(experience < 0, 0, experience), # Ensure no negative experience
+    experience_sq = experience^2,
+
+    # Distinct work type dummies
+    work_wage = ifelse(worked_wage_job == 1, 1, 0),
+    work_agri = ifelse(worked_own_agriculture == 1, 1, 0),
+    work_nonfarm = ifelse(worked_nonfarm_enterprise == 1, 1, 0),
+    work_apprentice = ifelse(worked_apprentice_job == 1, 1, 0),
+    
+    # Rural/Urban dummy
+    is_rural = ifelse(sector == 2, 1, 0) # Assuming sector 1=Urban, 2=Rural
+  ) %>%
+  filter(sex == 2) %>% # Filter for female respondents
+  select(
+    # Core variables
+    annual_wage, ln_wage, years_schooling, years_schooling_sq, literacy, married_before_18, 
+    experience, experience_sq, age_num, is_rural,
+    # Education categorical & dummies
+    categorical_education, edu_primary, edu_secondary_junior, edu_secondary_senior, edu_higher,
+    # Parent's education
+    father_years_schooling, mother_years_schooling,
+    # Work type dummies
+    work_wage, work_agri, work_nonfarm, work_apprentice,
+    # Religion dummies
+    religion, is_christian, is_muslim,
+    # Fixed effects and Survey variables
+    zone, state, lga, wt_final
+  )
+
+# --- 2. Create Final Analysis Dataset ---
+df_complete <- df %>%
+  filter(complete.cases(
+    ln_wage, years_schooling, years_schooling_sq, literacy, married_before_18, experience, experience_sq, 
+    father_years_schooling, mother_years_schooling, is_rural,
+    work_wage, work_agri, work_nonfarm, work_apprentice,
+    religion, lga, state, wt_final,
+    edu_primary, edu_secondary_junior, edu_secondary_senior, edu_higher
+  )) %>%
+  filter(wt_final > 0) # Weights must be positive
+
+# Split data into whole country and northern regions
+df_all_country <- df_complete
+df_northern <- df_complete %>% filter(zone < 4)
+
+# --- NEW: TABLE 1a and 1b (Descriptive Statistics) ---
+# Table 1a: Whole Country
+desc_stats_all <- df_all_country %>%
+  select(
+    `Annual Wage` = annual_wage, `Years of Schooling` = years_schooling,
+    `Age` = age_num, `Experience` = experience, `Is Rural (1=Yes)` = is_rural,
+    `Married Before 18 (1=Yes)` = married_before_18, `Has Wage Job (1=Yes)` = work_wage,
+    `Works in Own Agriculture (1=Yes)` = work_agri, `Has Non-Farm Enterprise (1=Yes)` = work_nonfarm,
+    `Is Apprentice (1=Yes)` = work_apprentice, `Christian (1=Yes)` = is_christian,
+    `Muslim (1=Yes)` = is_muslim, `Father's Years of Schooling` = father_years_schooling,
+    `Mother's Years of Schooling` = mother_years_schooling
+    # If you want mean log wage in the table, add: `Log Annual Wage` = ln_wage
+  )
+stargazer(as.data.frame(desc_stats_all),
+          type = "text",
+          title = "Table 1a: Descriptive Statistics (Whole Country)",
+          summary.stat = c("n", "mean", "sd", "min", "max"),
+          digits = 2,
+          out = "table1a_desc_stats_all.txt")
+
+# Table 1b: Northern Nigeria
+desc_stats_north <- df_northern %>%
+  select(
+    `Annual Wage` = annual_wage, `Years of Schooling` = years_schooling,
+    `Age` = age_num, `Experience` = experience, `Is Rural (1=Yes)` = is_rural,
+    `Married Before 18 (1=Yes)` = married_before_18, `Has Wage Job (1=Yes)` = work_wage,
+    `Works in Own Agriculture (1=Yes)` = work_agri, `Has Non-Farm Enterprise (1=Yes)` = work_nonfarm,
+    `Is Apprentice (1=Yes)` = work_apprentice, `Christian (1=Yes)` = is_christian,
+    `Muslim (1=Yes)` = is_muslim, `Father's Years of Schooling` = father_years_schooling,
+    `Mother's Years of Schooling` = mother_years_schooling
+    # Optionally add: `Log Annual Wage` = ln_wage
+  )
+stargazer(as.data.frame(desc_stats_north),
+          type = "text",
+          title = "Table 1b: Descriptive Statistics (Northern Nigeria)",
+          summary.stat = c("n", "mean", "sd", "min", "max"),
+          digits = 2,
+          out = "table1b_desc_stats_north.txt")
+
+# --- 3. Define Survey Design Objects ---
+# For the whole country
+design_all <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_all_country)
+
+# For Northern Nigeria
+design_north <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_northern)
+
+# --- 4. Model Estimation and Table Generation ---
+
+# Define common model components
+omitted_controls <- c("Constant", "father_years_schooling", "mother_years_schooling",
+                      "work_wage", "work_agri", "work_nonfarm", "work_apprentice",
+                      "religion", "is_rural", "lga")
+table_notes <- "Coefficients estimated using svyglm with survey weights. Controls include: parent's education, work type, religion, and rural status."
+controls_formula <- "father_years_schooling + mother_years_schooling + work_wage + work_agri + work_nonfarm + work_apprentice + as.factor(religion) + is_rural"
+fe_formula <- "as.factor(lga)"
+
+custom_rows_5_models <- list(c("LGA FE", "Yes", "Yes", "Yes", "Yes", "Yes"),
+                             c("Other Controls", "No", "No", "No", "No", "Yes"))
+
+# === TABLE 2: Mincer Regressions (Whole Country) ===
+fit2.1 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq +", fe_formula)), design = design_all)
+fit2.2 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq + married_before_18 +", fe_formula)), design = design_all)
+fit2.3 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq + married_before_18 + experience + experience_sq +", fe_formula)), design = design_all)
+fit2.4 <- svyglm(as.formula(paste("ln_wage ~ years_schooling * married_before_18 + years_schooling_sq + experience + experience_sq +", fe_formula)), design = design_all)
+fit2.5 <- svyglm(as.formula(paste("ln_wage ~ years_schooling * married_before_18 + years_schooling_sq + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_all)
+stargazer(fit2.1, fit2.2, fit2.3, fit2.4, fit2.5, type = "text", title = "Table 2: Weighted Mincer Regressions for Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Years of Schooling", "Years of Schooling Sq.", "Married Before 18", "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "table2_mincer_all_weighted.txt")
+
+# === TABLE 3: Mincer Regressions (Northern Nigeria) ===
+fit3.1 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq +", fe_formula)), design = design_north)
+fit3.2 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq + married_before_18 +", fe_formula)), design = design_north)
+fit3.3 <- svyglm(as.formula(paste("ln_wage ~ years_schooling + years_schooling_sq + married_before_18 + experience + experience_sq +", fe_formula)), design = design_north)
+fit3.4 <- svyglm(as.formula(paste("ln_wage ~ years_schooling * married_before_18 + years_schooling_sq + experience + experience_sq +", fe_formula)), design = design_north)
+fit3.5 <- svyglm(as.formula(paste("ln_wage ~ years_schooling * married_before_18 + years_schooling_sq + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_north)
+stargazer(fit3.1, fit3.2, fit3.3, fit3.4, fit3.5, type = "text", title = "Table 3: Weighted Mincer Regressions for Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Years of Schooling", "Years of Schooling Sq.", "Married Before 18", "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "table3_mincer_north_weighted.txt")
+
+# === TABLE 4: Education Dummies and Female Earnings (Whole Country) ===
+educ_dummies <- "edu_primary + edu_secondary_junior + edu_secondary_senior"
+fit4.1 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher +", fe_formula)), design = design_all)
+fit4.2 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher + married_before_18 +", fe_formula)), design = design_all)
+fit4.3 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher + married_before_18 + experience + experience_sq +", fe_formula)), design = design_all)
+fit4.4 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher * married_before_18 + experience + experience_sq +", fe_formula)), design = design_all)
+fit4.5 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher * married_before_18 + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_all)
+stargazer(fit4.1, fit4.2, fit4.3, fit4.4, fit4.5, type = "text", title = "Table 4: Weighted Education Level Dummies and Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Primary", "Secondary Junior", "Secondary Senior", "Higher Education", "Married Before 18", "Experience", "Experience Sq.", "Higher Education x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "table4_edu_dummies_all_weighted.txt")
+
+# === TABLE 5: Education Dummies and Female Earnings (Northern Nigeria) ===
+fit5.1 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher +", fe_formula)), design = design_north)
+fit5.2 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher + married_before_18 +", fe_formula)), design = design_north)
+fit5.3 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher + married_before_18 + experience + experience_sq +", fe_formula)), design = design_north)
+fit5.4 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher * married_before_18 + experience + experience_sq +", fe_formula)), design = design_north)
+fit5.5 <- svyglm(as.formula(paste("ln_wage ~", educ_dummies, "+ edu_higher * married_before_18 + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_north)
+stargazer(fit5.1, fit5.2, fit5.3, fit5.4, fit5.5, type = "text", title = "Table 5: Weighted Education Level Dummies and Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Primary", "Secondary Junior", "Secondary Senior", "Higher Education", "Married Before 18", "Experience", "Experience Sq.", "Higher Education x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "table5_edu_dummies_north_weighted.txt")
+
+# --- 5. Appendix Tables ---
+# === Appendix Table 1: Literacy - Whole Country ===
+fitA1.1 <- svyglm(as.formula(paste("ln_wage ~ literacy +", fe_formula)), design = design_all)
+fitA1.2 <- svyglm(as.formula(paste("ln_wage ~ literacy + married_before_18 +", fe_formula)), design = design_all)
+fitA1.3 <- svyglm(as.formula(paste("ln_wage ~ literacy + married_before_18 + experience + experience_sq +", fe_formula)), design = design_all)
+fitA1.4 <- svyglm(as.formula(paste("ln_wage ~ literacy * married_before_18 + experience + experience_sq +", fe_formula)), design = design_all)
+fitA1.5 <- svyglm(as.formula(paste("ln_wage ~ literacy * married_before_18 + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_all)
+stargazer(fitA1.1, fitA1.2, fitA1.3, fitA1.4, fitA1.5, type = "text", title = "Appendix Table 1: Weighted Literacy and Female Earnings (Whole Country)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Literate", "Married Before 18", "Experience", "Experience Sq.", "Literate x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "appendix_table1_literacy_all_weighted.txt")
+
+# === Appendix Table 2: Literacy - Northern Nigeria ===
+fitA2.1 <- svyglm(as.formula(paste("ln_wage ~ literacy +", fe_formula)), design = design_north)
+fitA2.2 <- svyglm(as.formula(paste("ln_wage ~ literacy + married_before_18 +", fe_formula)), design = design_north)
+fitA2.3 <- svyglm(as.formula(paste("ln_wage ~ literacy + married_before_18 + experience + experience_sq +", fe_formula)), design = design_north)
+fitA2.4 <- svyglm(as.formula(paste("ln_wage ~ literacy * married_before_18 + experience + experience_sq +", fe_formula)), design = design_north)
+fitA2.5 <- svyglm(as.formula(paste("ln_wage ~ literacy * married_before_18 + experience + experience_sq +", controls_formula, "+", fe_formula)), design = design_north)
+stargazer(fitA2.1, fitA2.2, fitA2.3, fitA2.4, fitA2.5, type = "text", title = "Appendix Table 2: Weighted Literacy and Female Earnings (Northern Nigeria)",
+          dep.var.labels = rep("Log Annual Wage", 5),
+          covariate.labels = c("Literate", "Married Before 18", "Experience", "Experience Sq.", "Literate x Married Before 18"),
+          omit = omitted_controls, add.lines = custom_rows_5_models, notes = table_notes, out = "appendix_table2_literacy_north_weighted.txt")
+
+# --- End of Script ---
+
+```
+
+5) Plots
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# This code assumes you have already run step 3 above
+# --- 1. Create a data frame for prediction ---
+
+# Find the mean/mode of control variables to hold them constant
+mean_experience <- mean(df_northern$experience, na.rm = TRUE)
+mean_father_schooling <- mean(df_northern$father_years_schooling, na.rm = TRUE)
+mean_mother_schooling <- mean(df_northern$mother_years_schooling, na.rm = TRUE)
+
+# Note: The specific LGA chosen will shift the lines up or down, but won't
+get_mode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+mode_lga <- get_mode(df_northern$lga)
+mode_religion <- get_mode(df_northern$religion)
+mode_is_rural <- get_mode(df_northern$is_rural)
+mode_work_wage <- get_mode(df_northern$work_wage)
+mode_work_agri <- get_mode(df_northern$work_agri)
+mode_work_nonfarm <- get_mode(df_northern$work_nonfarm)
+mode_work_apprentice <- get_mode(df_northern$work_apprentice)
+
+# Create a grid with the variables of interest: years_schooling and married_before_18
+pred_data <- expand.grid(
+  years_schooling = 0:16,
+  married_before_18 = c(0, 1)
+) %>%
+  mutate(
+    # Add the other variables, holding them constant
+    years_schooling_sq = years_schooling^2,
+    experience = mean_experience,
+    experience_sq = mean_experience^2,
+    father_years_schooling = mean_father_schooling,
+    mother_years_schooling = mean_mother_schooling,
+    lga = mode_lga,
+    religion = mode_religion,
+    is_rural = mode_is_rural,
+    work_wage = mode_work_wage,
+    work_agri = mode_work_agri,
+    work_nonfarm = mode_work_nonfarm,
+    work_apprentice = mode_work_apprentice
+  )
+
+# --- 2. Predict the log annual wage using your model ---
+pred_data$ln_wage_pred <- predict(fit3.5, newdata = pred_data)
+
+# --- 3. Create the plot using ggplot2 ---
+# Create a factor variable for prettier labels in the legend
+pred_data$Marital_Status <- factor(pred_data$married_before_18,
+                                   levels = c(0, 1),
+                                   labels = c("Did Not Marry Before 18", "Married Before 18"))
+
+# Generate the plot
+wage_plot <- ggplot(pred_data, aes(x = years_schooling, y = exp(ln_wage_pred), color = Marital_Status)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("Did Not Marry Before 18" = "blue", "Married Before 18" = "red")) +
+  scale_y_continuous(labels = scales::comma) + # Format y-axis labels with commas
+  labs(
+    title = "Impact of Early Marriage on Women's Annual Earnings in Northern Nigeria",
+    subtitle = "Predicted wages based on Mincer regression for female earnings", # <-- UPDATED
+    x = "Years of Schooling",
+    y = "Predicted Annual Wage (in Naira)", # <-- UPDATED
+    color = "Marital Status" # Legend title
+  ) +
+  theme_minimal(base_size = 14) + # Use a clean theme
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+
+# Display the plot
+print(wage_plot)
+
+# Save the plot to a file
+ggsave("northern_nigeria_wage_plot_updated.png", plot = wage_plot, width = 10, height = 7, dpi = 300)
+
+cat("Plot has been saved as 'northern_nigeria_wage_plot_updated.png'")
+```
+
+6) Sensitivity Analysis
+```{r}
+# Sensitivity Analysis Code
+# This code creates additional analyses based on the main analysis script
+
+# Load necessary libraries (assuming they are already loaded from main script)
+# library(dplyr)
+# library(stargazer)
+# library(survey)
+
+# --- APPENDIX TABLE 3: Wage Distribution Analysis for Women ---
+# Re-create column 5 from tables 2 and 3 for different wage quantiles
+
+# Define wage quantiles for the complete female dataset
+wage_quantiles_all <- quantile(df_all_country$ln_wage, probs = c(0.33, 0.67), na.rm = TRUE)
+wage_quantiles_north <- quantile(df_northern$ln_wage, probs = c(0.33, 0.67), na.rm = TRUE)
+
+# Create wage distribution subsamples for whole country
+df_all_bottom <- df_all_country %>% filter(ln_wage <= wage_quantiles_all[1])
+df_all_middle <- df_all_country %>% filter(ln_wage > wage_quantiles_all[1] & ln_wage <= wage_quantiles_all[2])
+df_all_top <- df_all_country %>% filter(ln_wage > wage_quantiles_all[2])
+
+# Create wage distribution subsamples for northern Nigeria
+df_north_bottom <- df_northern %>% filter(ln_wage <= wage_quantiles_north[1])
+df_north_middle <- df_northern %>% filter(ln_wage > wage_quantiles_north[1] & ln_wage <= wage_quantiles_north[2])
+df_north_top <- df_northern %>% filter(ln_wage > wage_quantiles_north[2])
+
+# Alternative approach: Check for problematic strata and handle them
+# Function to check and potentially combine small strata
+check_and_fix_strata <- function(df, min_obs_per_stratum = 2) {
+  stratum_counts <- df %>% 
+    group_by(state) %>% 
+    summarise(n = n(), .groups = "drop")
+  
+  small_strata <- stratum_counts$state[stratum_counts$n < min_obs_per_stratum]
+  
+  if (length(small_strata) > 0) {
+    cat("Warning: States with fewer than", min_obs_per_stratum, "observations:", paste(small_strata, collapse = ", "), "\n")
+    
+    # Option 1: Remove observations from small strata
+    df_cleaned <- df %>% filter(!state %in% small_strata)
+    
+    # Option 2: Alternative - combine small strata with similar ones (zone-based)
+    # df_cleaned <- df %>%
+    #   mutate(state_combined = ifelse(state %in% small_strata, 
+    #                                  paste0("combined_zone_", zone), 
+    #                                  as.character(state)))
+    
+    return(df_cleaned)
+  } else {
+    return(df)
+  }
+}
+
+# Apply the fix to problematic subsamples
+df_all_bottom_clean <- check_and_fix_strata(df_all_bottom)
+df_all_middle_clean <- check_and_fix_strata(df_all_middle)
+df_all_top_clean <- check_and_fix_strata(df_all_top)
+
+df_north_bottom_clean <- check_and_fix_strata(df_north_bottom)
+df_north_middle_clean <- check_and_fix_strata(df_north_middle)
+df_north_top_clean <- check_and_fix_strata(df_north_top)
+
+# Create survey design objects for each subsample
+# Option 1: Use single-unit method for handling strata with only one PSU
+options(survey.lonely.psu = "adjust")
+
+design_all_bottom <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_all_bottom_clean)
+design_all_middle <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_all_middle_clean)
+design_all_top <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_all_top_clean)
+
+design_north_bottom <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_north_bottom_clean)
+design_north_middle <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_north_middle_clean)
+design_north_top <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_north_top_clean)
+
+# Alternative: If you still get errors, use zone instead of state for stratification
+# design_north_bottom <- svydesign(ids = ~1, strata = ~zone, weights = ~wt_final, data = df_north_bottom_clean)
+# design_north_middle <- svydesign(ids = ~1, strata = ~zone, weights = ~wt_final, data = df_north_middle_clean)
+# design_north_top <- svydesign(ids = ~1, strata = ~zone, weights = ~wt_final, data = df_north_top_clean)
+
+# Full model formula (replicating column 5)
+full_formula <- paste("ln_wage ~ years_schooling * married_before_18 + years_schooling_sq + experience + experience_sq +", 
+                     controls_formula, "+", fe_formula)
+
+# === APPENDIX TABLE 3A: Wage Distribution Analysis - Whole Country ===
+fitA3A.1 <- svyglm(as.formula(full_formula), design = design_all_bottom)
+fitA3A.2 <- svyglm(as.formula(full_formula), design = design_all_middle)
+fitA3A.3 <- svyglm(as.formula(full_formula), design = design_all_top)
+
+stargazer(fitA3A.1, fitA3A.2, fitA3A.3, 
+          type = "text", 
+          title = "Appendix Table 3A: Female Earnings by Wage Distribution (Whole Country)",
+          column.labels = c("Bottom Third", "Middle Third", "Top Third"),
+          dep.var.labels = rep("Log Annual Wage", 3),
+          covariate.labels = c("Years of Schooling", "Years of Schooling Sq.", "Married Before 18", 
+                              "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls,
+          add.lines = list(c("LGA FE", "Yes", "Yes", "Yes"),
+                          c("Other Controls", "Yes", "Yes", "Yes")),
+          notes = paste(table_notes, "Sample split by wage tertiles."),
+          out = "appendix_table3A_wage_distribution_all.txt")
+
+# === APPENDIX TABLE 3B: Wage Distribution Analysis - Northern Nigeria ===
+fitA3B.1 <- svyglm(as.formula(full_formula), design = design_north_bottom)
+fitA3B.2 <- svyglm(as.formula(full_formula), design = design_north_middle)
+fitA3B.3 <- svyglm(as.formula(full_formula), design = design_north_top)
+
+stargazer(fitA3B.1, fitA3B.2, fitA3B.3, 
+          type = "text", 
+          title = "Appendix Table 3B: Female Earnings by Wage Distribution (Northern Nigeria)",
+          column.labels = c("Bottom Third", "Middle Third", "Top Third"),
+          dep.var.labels = rep("Log Annual Wage", 3),
+          covariate.labels = c("Years of Schooling", "Years of Schooling Sq.", "Married Before 18", 
+                              "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls,
+          add.lines = list(c("LGA FE", "Yes", "Yes", "Yes"),
+                          c("Other Controls", "Yes", "Yes", "Yes")),
+          notes = paste(table_notes, "Sample split by wage tertiles."),
+          out = "appendix_table3B_wage_distribution_north.txt")
+
+# --- APPENDIX TABLE 4: Analysis for Men ---
+# Replicate the complete model (column 5) for men
+
+# Create male dataset following the same data preparation steps
+df_men <- nlss %>%
+  mutate(
+    # Dependent Variable: Annual Wage (same as female analysis)
+    annual_wage = case_when(
+      wage_frequency == 1 ~ wages * 8 * 260, # HOURLY
+      wage_frequency == 2 ~ wages * 260,     # DAILY
+      wage_frequency == 3 ~ wages * 52,      # WEEKLY
+      wage_frequency == 4 ~ wages * 26,      # BI-WEEKLY
+      wage_frequency == 5 ~ wages * 12,      # MONTHLY
+      wage_frequency == 6 ~ wages * 4,       # QUARTERLY
+      wage_frequency == 7 ~ wages * 2,       # BI-ANNUALLY
+      wage_frequency == 8 ~ wages * 1,       # ANNUALLY
+      TRUE ~ NA_real_
+    ),
+    ln_wage = log(annual_wage + 1),
+
+    # Education Variables & Quadratic Term (same functions as before)
+    years_schooling = years_of_schooling,
+    years_schooling_sq = years_schooling^2,
+    father_years_schooling = map_education_to_years(father_highest_educational_level),
+    mother_years_schooling = map_education_to_years(mother_highest_educational_level),
+    categorical_education = factor(map_education_to_category(hgstlvl_i),
+                                   levels = c(0, 1, 2, 3, 4),
+                                   labels = c("None", "Primary", "Secondary Junior", "Secondary Senior", "Higher Education")),
+    edu_primary = ifelse(categorical_education == "Primary", 1, 0),
+    edu_secondary_junior = ifelse(categorical_education == "Secondary Junior", 1, 0),
+    edu_secondary_senior = ifelse(categorical_education == "Secondary Senior", 1, 0),
+    edu_higher = ifelse(categorical_education == "Higher Education", 1, 0),
+
+    # Independent Variables
+    literacy = ifelse(literate == 1, 1, 0),
+    married_before_18 = ifelse(age_of_marriage < 18 & !is.na(age_of_marriage), 1, 0),
+    is_christian = ifelse(religion == 1, 1, 0),
+    is_muslim = ifelse(religion == 2, 1, 0),
+
+    # Experience Calculation
+    age_num = as.numeric(age),
+    experience = case_when(
+      years_schooling > 0  ~ age_num - years_schooling - 6,
+      years_schooling == 0 ~ age_num - 10, # Assumes work starts at 10 if not schooled
+      TRUE ~ 0
+    ),
+    experience = ifelse(experience < 0, 0, experience), # Ensure no negative experience
+    experience_sq = experience^2,
+
+    # Distinct work type dummies
+    work_wage = ifelse(worked_wage_job == 1, 1, 0),
+    work_agri = ifelse(worked_own_agriculture == 1, 1, 0),
+    work_nonfarm = ifelse(worked_nonfarm_enterprise == 1, 1, 0),
+    work_apprentice = ifelse(worked_apprentice_job == 1, 1, 0),
+    
+    # Rural/Urban dummy
+    is_rural = ifelse(sector == 2, 1, 0) # Assuming sector 1=Urban, 2=Rural
+  ) %>%
+  filter(sex == 1) %>% # Filter for male respondents (assuming 1=male, 2=female)
+  select(
+    # Core variables
+    annual_wage, ln_wage, years_schooling, years_schooling_sq, literacy, married_before_18, 
+    experience, experience_sq, age_num, is_rural,
+    # Education categorical & dummies
+    categorical_education, edu_primary, edu_secondary_junior, edu_secondary_senior, edu_higher,
+    # Parent's education
+    father_years_schooling, mother_years_schooling,
+    # Work type dummies
+    work_wage, work_agri, work_nonfarm, work_apprentice,
+    # Religion dummies
+    religion, is_christian, is_muslim,
+    # Fixed effects and Survey variables
+    zone, state, lga, wt_final
+  )
+
+# Create complete male datasets
+df_men_complete <- df_men %>%
+  filter(complete.cases(
+    ln_wage, years_schooling, years_schooling_sq, literacy, married_before_18, experience, experience_sq, 
+    father_years_schooling, mother_years_schooling, is_rural,
+    work_wage, work_agri, work_nonfarm, work_apprentice,
+    religion, lga, state, wt_final,
+    edu_primary, edu_secondary_junior, edu_secondary_senior, edu_higher
+  )) %>%
+  filter(wt_final > 0) # Weights must be positive
+
+# Split male data into whole country and northern regions
+df_men_all_country <- df_men_complete
+df_men_northern <- df_men_complete %>% filter(zone < 4)
+
+# Create survey design objects for men
+design_men_all <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_men_all_country)
+design_men_north <- svydesign(ids = ~1, strata = ~state, weights = ~wt_final, data = df_men_northern)
+
+# === APPENDIX TABLE 4A: Male Earnings - Whole Country ===
+fitA4A <- svyglm(as.formula(full_formula), design = design_men_all)
+
+# === APPENDIX TABLE 4B: Male Earnings - Northern Nigeria ===
+fitA4B <- svyglm(as.formula(full_formula), design = design_men_north)
+
+# Combined table for men
+stargazer(fitA4A, fitA4B, 
+          type = "text", 
+          title = "Appendix Table 4: Male Earnings Analysis",
+          column.labels = c("Whole Country", "Northern Nigeria"),
+          dep.var.labels = rep("Log Annual Wage", 2),
+          covariate.labels = c("Years of Schooling", "Years of Schooling Sq.", "Married Before 18", 
+                              "Experience", "Experience Sq.", "Schooling x Married Before 18"),
+          omit = omitted_controls,
+          add.lines = list(c("LGA FE", "Yes", "Yes"),
+                          c("Other Controls", "Yes", "Yes")),
+          notes = paste(table_notes, "Analysis restricted to male respondents."),
+          out = "appendix_table4_male_earnings.txt")
+
+# --- Summary Statistics for Context ---
+cat("=== SAMPLE SIZES ===\n")
+cat("Female Analysis:\n")
+cat("Whole Country:", nrow(df_all_country), "observations\n")
+cat("Northern Nigeria:", nrow(df_northern), "observations\n")
+cat("\nWage Distribution (Whole Country):\n")
+cat("Bottom Third:", nrow(df_all_bottom_clean), "observations\n")
+cat("Middle Third:", nrow(df_all_middle_clean), "observations\n")
+cat("Top Third:", nrow(df_all_top_clean), "observations\n")
+cat("\nWage Distribution (Northern Nigeria):\n")
+cat("Bottom Third:", nrow(df_north_bottom_clean), "observations\n")
+cat("Middle Third:", nrow(df_north_middle_clean), "observations\n")
+cat("Top Third:", nrow(df_north_top_clean), "observations\n")
+cat("\nMale Analysis:\n")
+cat("Whole Country:", nrow(df_men_all_country), "observations\n")
+cat("Northern Nigeria:", nrow(df_men_northern), "observations\n")
+
+# Additional diagnostic: Check stratum sizes
+cat("\n=== STRATUM DIAGNOSTICS ===\n")
+cat("Northern Nigeria subsamples - States per tertile:\n")
+cat("Bottom:", length(unique(df_north_bottom_clean$state)), "states\n")
+cat("Middle:", length(unique(df_north_middle_clean$state)), "states\n") 
+cat("Top:", length(unique(df_north_top_clean$state)), "states\n")
+
+# --- End of Sensitivity Analysis Script ---
+```
