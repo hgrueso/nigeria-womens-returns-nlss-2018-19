@@ -1,3 +1,5 @@
-Schooling, Child Marriage, and Women’s Earnings in (Northern) Nigeria — NLSS 2018–19
+#Schooling, Child Marriage, and Women’s Earnings in (Northern) Nigeria — NLSS 2018–19
 
 This repository contains the code to estimate the association between education and women’s earnings in Nigeria—with a focus on Northern Nigeria’s informal labor markets—using the 2018–19 Nigeria Living Standards Survey (NLSS). The script builds annualized wages from reported pay and frequency; constructs potential experience (Age − Schooling − 6; or Age − 10 if no schooling, truncated at zero); and estimates survey-weighted Mincer-type regressions with Local Government Area (LGA) fixed effects and a rich set of controls. Outputs include descriptive statistics (Tables 1a–1b), national and Northern subsample regressions (Tables 2–3), education-level specifications (Tables 4–5), and literacy robustness checks (Appendix Tables 1–2).
+
+<img width="3000" height="2100" alt="northern_nigeria_wage_plot_updated" src="https://github.com/user-attachments/assets/1ecbb5ae-aa09-4385-bbf1-cb0f90f52d53" />
